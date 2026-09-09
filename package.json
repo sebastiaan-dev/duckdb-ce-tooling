@@ -1,0 +1,27 @@
+{
+  "name": "community-extension-map",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run server/dev.ts",
+    "server": "bun run server/index.ts",
+    "build": "tsc -b && vite build",
+    "check": "bun test"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "elysia": "^1.4.30",
+    "lucide-react": "latest",
+    "postgres": "^3.4.9",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest"
+  }
+}
