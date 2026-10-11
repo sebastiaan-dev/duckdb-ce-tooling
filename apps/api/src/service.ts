@@ -1,8 +1,16 @@
 import { createBrotliDecompress, createGunzip } from "node:zlib";
 import { Readable } from "node:stream";
+import type { BinaryStatus, Extension } from "@ce-map/contracts";
 import type { Cached, PersistentCache } from "./cache";
 
-export const DUCKDB_VERSION = "v1.5.5";
+export const DEFAULT_DUCKDB_VERSION = "v1.5.5";
+const VERSION_PATTERN = /^v\d+\.\d+\.\d+$/;
+const RELEASE_URL = "https://api.github.com/repos/duckdb/duckdb/releases/latest";
+const VERSION_TTL = 60 * 60_000;
+
+export function isDuckdbVersion(value: unknown): value is string {
+  return typeof value === "string" && VERSION_PATTERN.test(value);
+}
 export const STANDARD_PLATFORMS = [
   "linux_amd64",
   "linux_arm64",
@@ -15,27 +23,15 @@ export const STANDARD_PLATFORMS = [
 const OPT_IN_PLATFORMS = ["linux_amd64_musl", "linux_arm64_musl", "windows_arm64"] as const;
 const RAW_ROOT = "https://raw.githubusercontent.com/duckdb/community-extensions";
 const TREE_URL = "https://api.github.com/repos/duckdb/community-extensions/git/trees/main?recursive=1";
+
 const BINARY_ROOT = "https://community-extensions.duckdb.org";
 
-type DescriptorFields = {
-  name: string;
-  description: string;
-  repo: string;
-  ref: string;
-  platforms: string[];
-};
-export type Extension = DescriptorFields & { descriptorSha: string };
-export type BinaryStatus = {
-  status: "current" | "stale" | "missing" | "error";
-  checkedDescriptorRef: string;
-  checkedDescriptorSha: string;
-  builtRef?: string;
-  platform?: string;
-  duckdbVersion?: string;
-  size?: number;
-  checkedAt: string;
-  detail?: string;
-};
+type DescriptorFields = Omit<Extension, "descriptorSha">;
+
+export function binaryUrl(version: string, platform: string, name: string) {
+  const suffix = platform.startsWith("wasm") ? "wasm" : "gz";
+  return `${BINARY_ROOT}/${version}/${platform}/${name}.duckdb_extension.${suffix}`;
+}
 
 type TreeItem = { path: string; type: string; sha?: string };
 type TreeResponse = { sha?: string; tree?: TreeItem[] };
@@ -82,18 +78,41 @@ export async function readBinaryMetadata(response: Response, isWasm: boolean) {
 }
 
 export class AuditService {
-  private catalogCache?: Cached<Extension[]>;
+  private readonly catalogCache = new Map<string, Cached<Extension[]>>();
+  private versionCache?: Cached<string>;
   private readonly statusCache = new Map<string, Cached<BinaryStatus>>();
   private readonly inFlightChecks = new Map<string, Promise<BinaryStatus>>();
 
   constructor(private readonly fetcher: typeof fetch = fetch, private readonly persistence?: PersistentCache) {}
 
-  async getCatalog(force = false): Promise<Extension[]> {
-    if (!force && this.catalogCache && this.catalogCache.expires > Date.now()) return this.catalogCache.data;
+  async resolveDuckdbVersion(requested?: string): Promise<string> {
+    if (requested !== undefined) {
+      if (!isDuckdbVersion(requested)) throw new Error(`Unsupported DuckDB version "${requested}"`);
+      return requested;
+    }
+    if (this.versionCache && this.versionCache.expires > Date.now()) return this.versionCache.data;
+    try {
+      const response = await this.fetcher(RELEASE_URL, { headers: { Accept: "application/vnd.github+json", "User-Agent": "ce-map" } });
+      if (!response.ok) throw new Error(`Release lookup failed (${response.status})`);
+      const release: unknown = await response.json();
+      const tag = typeof release === "object" && release !== null && "tag_name" in release ? release.tag_name : undefined;
+      if (!isDuckdbVersion(tag)) throw new Error("Release response had no valid tag");
+      this.versionCache = { data: tag, expires: Date.now() + VERSION_TTL };
+      return tag;
+    } catch {
+      return DEFAULT_DUCKDB_VERSION;
+    }
+  }
+
+  async getCatalog(version: string, force = false): Promise<Extension[]> {
+    if (!force) {
+      const cached = this.catalogCache.get(version);
+      if (cached && cached.expires > Date.now()) return cached.data;
+    }
     if (!force && this.persistence) {
-      const cached = await this.persistence.getCatalog(DUCKDB_VERSION);
+      const cached = await this.persistence.getCatalog(version);
       if (cached) {
-        this.catalogCache = cached;
+        this.catalogCache.set(version, cached);
         return cached.data;
       }
     }
@@ -107,23 +126,23 @@ export class AuditService {
     }).filter((item): item is { path: string; descriptorSha: string } => item !== null) ?? [];
     const results: Extension[] = [];
     for (let offset = 0; offset < descriptors.length; offset += 24) {
-      const batch = await Promise.all(descriptors.slice(offset, offset + 24).map(async ({ path, descriptorSha }) => {
+      const batch = await Promise.all(descriptors.slice(offset, offset + 24).map(async ({ path, descriptorSha }): Promise<Extension | null> => {
         const response = await this.fetcher(`${RAW_ROOT}/${snapshotSha}/${path}`);
         if (!response.ok) return null;
         const descriptor = parseDescriptor(await response.text());
-        return descriptor ? { ...descriptor, descriptorSha } : null;
+        return descriptor ? { ...descriptor, descriptorSha, descriptorPath: path } : null;
       }));
       results.push(...batch.filter((item): item is Extension => item !== null));
     }
     results.sort((a, b) => a.name.localeCompare(b.name));
     const cached = { data: results, expires: Date.now() + 5 * 60_000 };
-    this.catalogCache = cached;
-    if (this.persistence) await this.persistence.saveCatalog(DUCKDB_VERSION, results, cached.expires);
+    this.catalogCache.set(version, cached);
+    if (this.persistence) await this.persistence.saveCatalog(version, results, cached.expires);
     return cached.data;
   }
 
-  async checkBinary(extension: Extension, platform: string): Promise<BinaryStatus> {
-    const key = `${DUCKDB_VERSION}/${platform}/${extension.name}/${extension.ref}/${extension.descriptorSha}`;
+  async checkBinary(extension: Extension, platform: string, version: string): Promise<BinaryStatus> {
+    const key = `${version}/${platform}/${extension.name}/${extension.ref}/${extension.descriptorSha}`;
     const cached = this.statusCache.get(key);
     if (cached && cached.expires > Date.now()) return cached.data;
     const inFlight = this.inFlightChecks.get(key);
@@ -132,7 +151,7 @@ export class AuditService {
     const request = (async () => {
       if (this.persistence) {
         const cached = await this.persistence.getBinary({
-          version: DUCKDB_VERSION,
+          version,
           platform,
           extension: extension.name,
           ref: extension.ref,
@@ -145,21 +164,20 @@ export class AuditService {
       }
       const checkedAt = new Date().toISOString();
       const isWasm = platform.startsWith("wasm");
-      const suffix = isWasm ? "wasm" : "gz";
-      const url = `${BINARY_ROOT}/${DUCKDB_VERSION}/${platform}/${extension.name}.duckdb_extension.${suffix}`;
+      const url = binaryUrl(version, platform, extension.name);
       let data: BinaryStatus;
       try {
         const head = await this.fetcher(url, { method: "HEAD" });
         if (head.status === 404) {
-          data = { status: "missing", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, detail: "No deployed binary" };
+          data = { status: "missing", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, binaryUrl: url, detail: "No deployed binary" };
         } else if (!head.ok && head.status !== 405) {
-          data = { status: "error", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, detail: `Registry returned HTTP ${head.status}` };
+          data = { status: "error", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, binaryUrl: url, detail: `Registry returned HTTP ${head.status}` };
         } else {
           const response = await this.fetcher(url);
           if (response.status === 404) {
-            data = { status: "missing", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, detail: "No deployed binary" };
+            data = { status: "missing", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, binaryUrl: url, detail: "No deployed binary" };
           } else if (!response.ok) {
-            data = { status: "error", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, detail: `Registry returned HTTP ${response.status}` };
+            data = { status: "error", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, binaryUrl: url, detail: `Registry returned HTTP ${response.status}` };
           } else {
             const metadata = await readBinaryMetadata(response, isWasm);
             const current = extension.ref.startsWith(metadata.extensionVersion) || metadata.extensionVersion.startsWith(extension.ref);
@@ -167,6 +185,7 @@ export class AuditService {
               status: current ? "current" : "stale",
               checkedDescriptorRef: extension.ref,
               checkedDescriptorSha: extension.descriptorSha,
+              binaryUrl: url,
               builtRef: metadata.extensionVersion,
               duckdbVersion: metadata.duckdbVersion,
               platform: metadata.platform,
@@ -176,12 +195,12 @@ export class AuditService {
           }
         }
       } catch (error) {
-        data = { status: "error", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, detail: error instanceof Error ? error.message : "Binary check failed" };
+        data = { status: "error", checkedDescriptorRef: extension.ref, checkedDescriptorSha: extension.descriptorSha, checkedAt, binaryUrl: url, detail: error instanceof Error ? error.message : "Binary check failed" };
       }
       const cached = { data, expires: Date.now() + 30 * 60_000 };
       this.statusCache.set(key, cached);
       if (this.persistence) await this.persistence.saveBinary({
-        version: DUCKDB_VERSION,
+        version,
         platform,
         extension: extension.name,
         ref: extension.ref,

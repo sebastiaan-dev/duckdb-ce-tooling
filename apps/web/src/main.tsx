@@ -16,26 +16,12 @@ import {
   XCircle,
 } from "lucide-react";
 import { Status, type StatusKind } from "./status";
+import { ApiPaths, type BinaryStatus, type CatalogResponse, type Extension } from "@ce-map/contracts";
 import "./styles.css";
 
-type Extension = {
-  name: string;
-  description: string;
-  repo: string;
-  ref: string;
-  descriptorSha: string;
-  platforms: string[];
-};
+type Check = BinaryStatus;
 type CheckStatus = Exclude<StatusKind, "checking" | "pending" | "recheck">;
-type Check = {
-  status: CheckStatus;
-  checkedDescriptorRef: string;
-  checkedDescriptorSha: string;
-  builtRef?: string;
-  checkedAt: string;
-  detail?: string;
-};
-type Catalog = { duckdbVersion: string; extensions: Extension[] };
+type Catalog = CatalogResponse;
 type ScanState = { active: boolean; completed: number; total: number; label: string };
 
 const AUDIT_CACHE_KEY = "ce-map:audit-cache:v2";
@@ -68,7 +54,7 @@ function App() {
     setRefreshingCatalog(true);
     setError("");
     try {
-      const response = await fetch(`/api/catalog${force ? "?refresh=1" : ""}`);
+      const response = await fetch(`${ApiPaths.catalog}${force ? "?refresh=1" : ""}`);
       const body = await response.json() as Catalog & { error?: string };
       if (!response.ok) throw new Error(body.error ?? "Catalog request failed");
       setCatalog(body);
@@ -198,7 +184,7 @@ function App() {
         if (!item) return;
         const key = keyFor(item.extension.name, item.platform);
         try {
-          const response = await fetch(`/api/check?extension=${encodeURIComponent(item.extension.name)}&platform=${encodeURIComponent(item.platform)}`, { signal: controller.signal });
+          const response = await fetch(`${ApiPaths.check}?extension=${encodeURIComponent(item.extension.name)}&platform=${encodeURIComponent(item.platform)}`, { signal: controller.signal });
           const result = await response.json() as Check & { error?: string };
           if (!response.ok) throw new Error(result.error ?? "Audit request failed");
           if (controller.signal.aborted || scanId.current !== run) return;

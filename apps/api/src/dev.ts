@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 const apiPort = Number(process.env.CE_API_PORT ?? "3001");
 const apiHost = process.env.CE_API_HOST ?? "127.0.0.1";
 const childEnv = { ...process.env, HOST: apiHost, PORT: String(apiPort) };
-const api = spawn(process.execPath, ["run", "server/index.ts"], { env: childEnv, stdio: "inherit" });
+const api = spawn(process.execPath, ["run", new URL("./index.ts", import.meta.url).pathname], { env: childEnv, stdio: "inherit" });
 let web: ChildProcess | undefined;
 
 async function waitForApi() {
@@ -36,7 +36,7 @@ process.on("SIGTERM", shutdown);
 
 try {
   await waitForApi();
-  web = spawn(process.execPath, ["x", "vite", ...process.argv.slice(2)], { env: process.env, stdio: "inherit" });
+  web = spawn(process.execPath, ["x", "vite", ...process.argv.slice(2)], { env: process.env, stdio: "inherit", cwd: new URL("../../web", import.meta.url).pathname });
   const exitCode = await waitForExit(web);
   shutdown();
   process.exit(exitCode);

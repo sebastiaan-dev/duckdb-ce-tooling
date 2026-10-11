@@ -1,0 +1,5 @@
+# Rust workspace. Future crates (e.g. the CLI, consuming the HTTP contract in
+# packages/contracts) live in crates/*, e.g. `cargo new --bin crates/cli`.
+[workspace]
+resolver = "2"
+members = ["crates/*"]

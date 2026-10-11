@@ -1,6 +1,6 @@
 import { brotliCompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
-import { parseDescriptor, readBinaryMetadata } from "./server/service";
+import { AuditService, binaryUrl, DEFAULT_DUCKDB_VERSION, parseDescriptor, readBinaryMetadata } from "./service";
 
 function binaryFooter() {
   const footer = Buffer.alloc(512);
@@ -40,5 +40,34 @@ describe("community extension metadata", () => {
       duckdbVersion: "v1.5.5",
       platform: "linux_amd64",
     });
+  });
+
+  test("builds binary URLs with a wasm suffix for wasm platforms", () => {
+    expect(binaryUrl("v1.5.5", "linux_amd64", "demo")).toBe("https://community-extensions.duckdb.org/v1.5.5/linux_amd64/demo.duckdb_extension.gz");
+    expect(binaryUrl("v1.5.5", "wasm_mvp", "demo")).toBe("https://community-extensions.duckdb.org/v1.5.5/wasm_mvp/demo.duckdb_extension.wasm");
+  });
+
+  test("resolveDuckdbVersion prefers explicit versions and rejects malformed ones", async () => {
+    const service = new AuditService((() => {
+      throw new Error("must not hit the network");
+    }) as unknown as typeof fetch);
+    await expect(service.resolveDuckdbVersion("v1.5.5")).resolves.toBe("v1.5.5");
+    await expect(service.resolveDuckdbVersion("nope")).rejects.toThrow();
+  });
+
+  test("resolveDuckdbVersion caches the latest stable release", async () => {
+    let calls = 0;
+    const service = new AuditService((async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ tag_name: "v9.9.9" }));
+    }) as unknown as typeof fetch);
+    await expect(service.resolveDuckdbVersion()).resolves.toBe("v9.9.9");
+    await expect(service.resolveDuckdbVersion()).resolves.toBe("v9.9.9");
+    expect(calls).toBe(1);
+  });
+
+  test("resolveDuckdbVersion falls back when the release lookup fails", async () => {
+    const service = new AuditService((async () => new Response("nope", { status: 500 })) as unknown as typeof fetch);
+    await expect(service.resolveDuckdbVersion()).resolves.toBe(DEFAULT_DUCKDB_VERSION);
   });
 });

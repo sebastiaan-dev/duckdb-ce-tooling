@@ -1,0 +1,22 @@
+{
+  "name": "@ce-map/api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "bun run src/dev.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@ce-map/contracts": "workspace:*",
+    "elysia": "^1.4.30",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "bun-types": "^1.4.2",
+    "typescript": "latest"
+  }
+}

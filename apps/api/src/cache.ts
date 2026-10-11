@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import type { BinaryStatus, Extension } from "./service";
+import type { BinaryStatus, Extension } from "@ce-map/contracts";
 
 export type Cached<T> = { expires: number; data: T };
 
